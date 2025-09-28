@@ -13,7 +13,7 @@ import * as d3 from "d3";
  * - タグ検索：入力に合致するタグを持つノードをハイライト（AND検索）
  * - マウスドラッグで右側のマインドマップをパン、スライダーでズーム
  * - Enterで自動インデント改行／Tab/Shift+Tabでインデント調整
- * - localStorage にテキスト・設定保存、スナップショット履歴（最大30件）
+ * - localStorage にテキスト・設定保存、スナップショット履歴（手動・最大30件）
  */
 
 // --- 型定義 ---
@@ -312,17 +312,18 @@ export default function VocabularyMindMapApp() {
     try { localStorage.setItem(STORAGE_META_KEY, JSON.stringify({ zoom, hSpace, vSpace, tagQuery })); } catch {}
   }, [zoom, hSpace, vSpace, tagQuery]);
 
-  // スナップショット保存（手動/自動）
+  // スナップショット保存（手動のみ）
   const saveSnapshot = () => {
     const snap = { ts: Date.now(), text } as Snapshot;
     const next = [snap, ...history].slice(0, 30);
     setHistory(next);
     try { localStorage.setItem(STORAGE_HISTORY_KEY, JSON.stringify(next)); } catch {}
   };
-  useEffect(() => {
-    const id = setTimeout(() => { saveSnapshot(); }, 2500);
-    return () => clearTimeout(id);
-  }, [text]);
+  // 自動スナップショットは無効化（ユーザー要望）
+// useEffect(() => {
+//   const id = setTimeout(() => { saveSnapshot(); }, 2500);
+//   return () => clearTimeout(id);
+// }, [text]);
 
   const parsed = useMemo(() => parseText(text), [text]);
   const hierarchy = useMemo(() => toHierarchy(parsed.root), [parsed]);
@@ -472,7 +473,7 @@ export default function VocabularyMindMapApp() {
     <div className="w-full h-[100vh] bg-neutral-50 text-neutral-800">
       {/* ヘッダー */}
       <div className="flex items-center justify-between px-4 py-2 border-b bg-white">
-        <div className="font-semibold">Word Wald by H.K.</div>
+        <div className="font-semibold">英単語マインドマップ（テキスト⇔図 同期）</div>
         <div className="flex items-center gap-3 flex-wrap">
           <div className="text-sm text-neutral-500 hidden lg:block">
             インデント: タブ/スペース2個 ｜ 色: <code>\\color</code>{'{#hex|name}'} ｜ ラベル: <code>\\label</code>{'{name}'} ｜ 参照: <code>\\ref</code>{'{name}'} ｜ 品詞: <code>\\pos</code>{'{noun}'} ｜ タグ: <code>\\tags</code>{'{a,b}'}
