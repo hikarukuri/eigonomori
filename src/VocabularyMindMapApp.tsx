@@ -556,7 +556,7 @@ export default function VocabularyMindMapApp() {
 
       {/* ヘッダー */}
       <div className="flex items-center justify-between px-4 py-2 border-b bg-white">
-        <div className="font-semibold">英単語マインドマップ（テキスト⇔図 同期）</div>
+        <div className="font-semibold">Word Wald by H.K.</div>
         <div className="flex items-center gap-3 flex-wrap" data-toolbar>
           <div className="text-sm text-neutral-500 hidden lg:block">
             インデント: タブ/スペース2個 ｜ 色: <code>\\color</code>{'{#hex|name}'} ｜ ラベル: <code>\\label</code>{'{name}'} ｜ 参照: <code>\\ref</code>{'{name}'} ｜ 品詞: <code>\\pos</code>{'{noun}'} ｜ タグ: <code>\\tags</code>{'{a,b}'}
