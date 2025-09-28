@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import * as d3 from "d3";
+import { jsPDF } from "jspdf";
 
 /**
  * 英単語暗記用マインドマップ Web アプリ（改良版）
@@ -14,6 +15,8 @@ import * as d3 from "d3";
  * - マウスドラッグで右側のマインドマップをパン、スライダーでズーム
  * - Enterで自動インデント改行／Tab/Shift+Tabでインデント調整
  * - localStorage にテキスト・設定保存、スナップショット履歴（手動・最大30件）
+ * - 仕切りバーをドラッグして左右パネル幅を変更（15%〜85%）
+ * - ヘッダーに PDF 出力ボタン（右パネル全体を 1 ページ PDF 保存）
  */
 
 // --- 型定義 ---
@@ -264,6 +267,19 @@ function runSelfTests(): TestResult[] {
   assert("indent carry: tabs", nextLineIndent("\t\tbar") === "\t\t");
   assert("indent carry: mix two-spaces only", nextLineIndent("    baz") === "    ");
 
+  // 7) 色指定: #HEX と未知プリセット
+  const t5 = parseText(`X \\color{#abc}\n  Y\nZ \\color{unknown}`);
+  const x = t5.root.children[0];
+  const y = x?.children[0];
+  const z = t5.root.children[1];
+  assert("hex color resolved (#abc -> effective)", /^#/.test(x?.effectiveColor || ""));
+  assert("hex propagation to child", y?.effectiveColor === x?.effectiveColor, `child=${y?.effectiveColor} parent=${x?.effectiveColor}`);
+  assert("unknown preset ignored", !z?.effectiveColor, `z=${z?.effectiveColor}`);
+
+  // 8) resolveColor: 大文字プリセットや #6桁HEX
+  assert("preset case-insensitive", resolveColor("RED") === COLOR_PRESETS.red);
+  assert("6-digit hex ok", resolveColor("#123456") === "#123456");
+
   return results;
 }
 
@@ -273,8 +289,12 @@ export default function VocabularyMindMapApp() {
   const [hSpace, setHSpace] = useState(140); // 水平距離
   const [vSpace, setVSpace] = useState(48); // 垂直距離
   const [tagQuery, setTagQuery] = useState<string>("");
+  const [leftPct, setLeftPct] = useState<number>(50);
+  const panelsRef = useRef<HTMLDivElement | null>(null);
+  const splitDragRef = useRef<{ dragging: boolean; startX: number; startPct: number } | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
+  const exportSvgRef = useRef<SVGSVGElement | null>(null);
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const dragRef = useRef<{ dragging: boolean; sx: number; sy: number; pan0: { x: number; y: number } } | null>(null);
   const [testResults, setTestResults] = useState<TestResult[] | null>(null);
@@ -302,6 +322,7 @@ export default function VocabularyMindMapApp() {
         if (typeof meta.hSpace === 'number') setHSpace(meta.hSpace);
         if (typeof meta.vSpace === 'number') setVSpace(meta.vSpace);
         if (typeof meta.tagQuery === 'string') setTagQuery(meta.tagQuery);
+        if (typeof meta.leftPct === 'number') setLeftPct(Math.max(15, Math.min(85, meta.leftPct)));
       }
     } catch {}
   }, []);
@@ -309,8 +330,8 @@ export default function VocabularyMindMapApp() {
   // オートセーブ（テキスト＆メタ）
   useEffect(() => { try { localStorage.setItem(STORAGE_KEY, text); } catch {} }, [text]);
   useEffect(() => {
-    try { localStorage.setItem(STORAGE_META_KEY, JSON.stringify({ zoom, hSpace, vSpace, tagQuery })); } catch {}
-  }, [zoom, hSpace, vSpace, tagQuery]);
+    try { localStorage.setItem(STORAGE_META_KEY, JSON.stringify({ zoom, hSpace, vSpace, tagQuery, leftPct })); } catch {}
+  }, [zoom, hSpace, vSpace, tagQuery, leftPct]);
 
   // スナップショット保存（手動のみ）
   const saveSnapshot = () => {
@@ -320,10 +341,10 @@ export default function VocabularyMindMapApp() {
     try { localStorage.setItem(STORAGE_HISTORY_KEY, JSON.stringify(next)); } catch {}
   };
   // 自動スナップショットは無効化（ユーザー要望）
-// useEffect(() => {
-//   const id = setTimeout(() => { saveSnapshot(); }, 2500);
-//   return () => clearTimeout(id);
-// }, [text]);
+  // useEffect(() => {
+  //   const id = setTimeout(() => { saveSnapshot(); }, 2500);
+  //   return () => clearTimeout(id);
+  // }, [text]);
 
   const parsed = useMemo(() => parseText(text), [text]);
   const hierarchy = useMemo(() => toHierarchy(parsed.root), [parsed]);
@@ -469,18 +490,83 @@ export default function VocabularyMindMapApp() {
   const onSvgMouseUp = () => { if (dragRef.current) dragRef.current.dragging = false; };
   const onSvgMouseLeave = () => { if (dragRef.current) dragRef.current.dragging = false; };
 
+  // --- PDF 出力 ---
+  const exportPDF = async () => {
+    const svg = exportSvgRef.current; // 変換専用の隠しSVG（パン・ズーム無視、全体）
+    if (!svg) return;
+    const serializer = new XMLSerializer();
+    // 一時的に xmlns を保証
+    svg.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+    const source = serializer.serializeToString(svg);
+    const svgBlob = new Blob([source], { type: "image/svg+xml;charset=utf-8" });
+    const url = URL.createObjectURL(svgBlob);
+
+    await new Promise<void>((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        // 高解像度化のためスケール
+        const scale = 2; // 2x
+        const canvas = document.createElement("canvas");
+        canvas.width = img.width * scale;
+        canvas.height = img.height * scale;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) { URL.revokeObjectURL(url); return resolve(); }
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+        // PDF へ貼り付け（pt 単位に変換: 1px = 72/96pt）
+        const pxToPt = (n: number) => (n * 72) / 96;
+        const wPt = pxToPt(img.width * scale);
+        const hPt = pxToPt(img.height * scale);
+        const orientation = wPt >= hPt ? "landscape" : "portrait";
+        const doc = new jsPDF({ orientation, unit: "pt", format: [wPt, hPt] });
+        const png = canvas.toDataURL("image/png");
+        doc.addImage(png, "PNG", 0, 0, wPt, hPt);
+        doc.save("mindmap.pdf");
+        URL.revokeObjectURL(url);
+        resolve();
+      };
+      img.src = url;
+    });
+  };
+
+  // --- リサイズ用スプリッタ ---
+  const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
+  const onSplitterDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!panelsRef.current) return;
+    splitDragRef.current = { dragging: true, startX: e.clientX, startPct: leftPct };
+    const onMove = (ev: MouseEvent) => {
+      if (!splitDragRef.current?.dragging || !panelsRef.current) return;
+      const rect = panelsRef.current.getBoundingClientRect();
+      const dx = ev.clientX - splitDragRef.current.startX;
+      const pct = clamp(splitDragRef.current.startPct + (dx / rect.width) * 100, 15, 85);
+      setLeftPct(pct);
+    };
+    const onUp = () => {
+      if (splitDragRef.current) splitDragRef.current.dragging = false;
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    e.preventDefault();
+  };
+
   return (
-    <div className="w-full h-[100vh] bg-neutral-50 text-neutral-800">
+    <div className="w-full h-[100vh] bg-neutral-50 text-neutral-800" data-app-root>
+
       {/* ヘッダー */}
       <div className="flex items-center justify-between px-4 py-2 border-b bg-white">
-        <div className="font-semibold">Word Wald by H.K.</div>
-        <div className="flex items-center gap-3 flex-wrap">
+        <div className="font-semibold">英単語マインドマップ（テキスト⇔図 同期）</div>
+        <div className="flex items-center gap-3 flex-wrap" data-toolbar>
           <div className="text-sm text-neutral-500 hidden lg:block">
             インデント: タブ/スペース2個 ｜ 色: <code>\\color</code>{'{#hex|name}'} ｜ ラベル: <code>\\label</code>{'{name}'} ｜ 参照: <code>\\ref</code>{'{name}'} ｜ 品詞: <code>\\pos</code>{'{noun}'} ｜ タグ: <code>\\tags</code>{'{a,b}'}
           </div>
           <div className="flex items-center gap-2">
             <label className="text-xs">Zoom</label>
             <input type="range" min={0.6} max={2.0} step={0.05} value={zoom} onChange={(e) => setZoom(parseFloat(e.target.value))} />
+          </div>
+          <div className="flex items-center gap-2">
+            <button className="text-xs border px-2 py-1 rounded" onClick={exportPDF} title="右パネルをPDF保存">PDF出力</button>
           </div>
           <div className="flex items-center gap-2">
             <label className="text-xs" title="タグ AND 検索（空欄で全表示）">タグ検索</label>
@@ -507,9 +593,9 @@ export default function VocabularyMindMapApp() {
       </div>
 
       {/* 本体 2 分割 */}
-      <div className="grid grid-cols-1 md:grid-cols-2 h-[calc(100vh-44px)]">
+      <div ref={panelsRef} className="h-[calc(100vh-44px)] flex">
         {/* 左：テキストエディタ */}
-        <div className="border-r bg-white">
+        <div className="border-r bg-white" style={{ width: `${leftPct}%` }}>
           <div className="h-full flex flex-col">
             <div className="flex items-center justify-between px-3 py-2 border-b">
               <div className="text-sm font-medium">テキストエディタ</div>
@@ -537,8 +623,17 @@ export default function VocabularyMindMapApp() {
           </div>
         </div>
 
+        {/* 仕切り（ドラッグで左右サイズ変更） */}
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          title={`${leftPct.toFixed(0)}%`}
+          className="w-1.5 bg-transparent hover:bg-slate-300/50 cursor-col-resize"
+          onMouseDown={onSplitterDown}
+        />
+
         {/* 右：マインドマップ */}
-        <div className="relative">
+        <div className="relative flex-1">
           <div className="absolute inset-0 overflow-auto bg-neutral-50">
             <svg
               ref={svgRef}
@@ -608,6 +703,44 @@ export default function VocabularyMindMapApp() {
             </svg>
           </div>
         </div>
+
+        {/* エクスポート用の隠しSVG（常に全体を出力） */}
+        <div style={{ position: 'absolute', left: -99999, top: -99999 }} aria-hidden="true">
+          <svg
+            ref={exportSvgRef}
+            width={width}
+            height={height}
+            viewBox={`${originX} ${originY} ${width} ${height}`}
+          >
+            <g transform={`translate(0,0) scale(1)`}>
+              {treeRoot.links().map((l, idx: number) => {
+                const s = { x: (l.source as any).x as number, y: (l.source as any).y as number };
+                const t = { x: (l.target as any).x as number, y: (l.target as any).y as number };
+                const targetData = (l.target as any).data as RawNode;
+                const c = (targetData.effectiveColor || "#94a3b8") as string;
+                return (
+                  <path key={`elink-${idx}`} d={diagonal(s, t)} fill="none" stroke={c} strokeOpacity={0.5} strokeWidth={1.5} />
+                );
+              })}
+              {crossLinks.map((cl, i) => (
+                <path key={`exref-${i}`} d={diagonal(cl.from, cl.to)} fill="none" strokeDasharray="4 3" stroke={cl.color || "#ef4444"} strokeOpacity={0.8} strokeWidth={1.5} />
+              ))}
+              {treeRoot.descendants().map((d, idx: number) => {
+                if ((d.data as RawNode).id === "root") return null;
+                const data = d.data as RawNode;
+                const color = data.effectiveColor || "#111827";
+                return (
+                  <g key={`enode-${idx}`} transform={`translate(${d.y},${d.x})`}>
+                    <circle r={6} fill="#fff" stroke={color} strokeWidth={2} />
+                    <text x={10} y={4} fontSize={12} fill={color}>{data.text}</text>
+                    {data.label && (<text x={10} y={18} fontSize={10} fill="#64748b">#{data.label}</text>)}
+                    {data.pos && (<text x={-6} y={-10} fontSize={9} textAnchor="end" fill="#475569">[{data.pos}]</text>)}
+                  </g>
+                );
+              })}
+            </g>
+          </svg>
+        </div>
       </div>
 
       {/* フッター：使い方 */}
@@ -619,6 +752,8 @@ export default function VocabularyMindMapApp() {
           <li><code>\\label</code>{'{name}'} で要素にラベルを付け、他の要素本文で <code>\\ref</code>{'{name}'} を使うとクロスリンク（破線）が描かれます（本文表示からは除去されます）。</li>
           <li>品詞は <code>\\pos</code>{'{noun|verb|adj|adv|prep|conj|pron|interj}'}、任意タグは <code>\\tags</code>{'{a,b}'} で付与できます。タグ検索ボックスに入力すると該当ノードのみ強調表示されます（AND検索）。</li>
           <li>右側の図はマウスドラッグで移動できます。ズームは上部スライダーから。</li>
+          <li>中央のバーをドラッグすると左右パネルの幅を変更できます。</li>
+          <li>右上の「PDF出力」で右パネル全体をPDF保存できます。</li>
           <li>右側のノードをクリックすると、左のテキストの対応行を選択します。</li>
         </ul>
         {testResults && (
