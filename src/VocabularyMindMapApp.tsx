@@ -12,6 +12,8 @@ import * as d3 from "d3";
  * - 任意タグ：\tags{tag1, tag2}
  * - タグ検索：入力に合致するタグを持つノードをハイライト（AND検索）
  * - マウスドラッグで右側のマインドマップをパン、スライダーでズーム
+ * - Enterで自動インデント改行／Tab/Shift+Tabでインデント調整
+ * - localStorage にテキスト・設定保存、スナップショット履歴（最大30件）
  */
 
 // --- 型定義 ---
@@ -127,29 +129,29 @@ function parseText(input: string): { root: RawNode; labelToId: Map<string, strin
     const refs: string[] = [];
     const tags: string[] = [];
 
-    // \color{...}
+    // \\color{...}
     const colorMatch = text.match(/\\color\{([^}]+)\}/i);
     if (colorMatch) {
       colorRaw = colorMatch[1].trim();
       text = text.replace(colorMatch[0], "").trim();
     }
-    // \label{name}
+    // \\label{name}
     const labelMatch = text.match(/\\label\{([^}]+)\}/);
     if (labelMatch) {
       label = labelMatch[1].trim();
       text = text.replace(labelMatch[0], "").trim();
     }
-    // \pos{tag}
+    // \\pos{tag}
     const posMatch = text.match(/\\pos\{([^}]+)\}/i);
     if (posMatch) {
       pos = posMatch[1].trim().toLowerCase();
       text = text.replace(posMatch[0], "").trim();
     }
-    // \tags{a,b,c}
+    // \\tags{a,b,c}
     const tagsMatch = text.match(/\\tags\{([^}]+)\}/i);
     if (tagsMatch) {
       const arr = tagsMatch[1]
-        .split(/[,\s]+/)
+        .split(/[\,\s]+/)
         .map((t) => t.trim().toLowerCase())
         .filter(Boolean);
       tags.push(...arr);
@@ -157,7 +159,7 @@ function parseText(input: string): { root: RawNode; labelToId: Map<string, strin
     }
     if (pos) tags.push(pos); // pos も tags に含める
 
-    // \ref{name}（複数可） ※表示テキストからは除去
+    // \\ref{name}（複数可） ※表示テキストからは除去
     const refRegex = /\\ref\{([^}]+)\}/g;
     let m: RegExpExecArray | null;
     while ((m = refRegex.exec(text))) refs.push(m[1].trim());
@@ -206,6 +208,13 @@ function diagonal(s: { x: number; y: number }, t: { x: number; y: number }) {
   return path;
 }
 
+// --- エディタ補助（自動インデント）---
+function leadingIndent(s: string) {
+  const m = s.match(/^(\t+|(?: {2})+)/);
+  return m ? m[0] : "";
+}
+function nextLineIndent(prevLine: string) { return leadingIndent(prevLine); }
+
 // --- 簡易テストユーティリティ ---
 interface TestResult { name: string; ok: boolean; details?: string }
 function runSelfTests(): TestResult[] {
@@ -250,6 +259,11 @@ function runSelfTests(): TestResult[] {
     assert("SAMPLE parse should not throw", false, String(e));
   }
 
+  // 6) 自動インデントの検証
+  assert("indent carry: two spaces", nextLineIndent("  foo") === "  ");
+  assert("indent carry: tabs", nextLineIndent("\t\tbar") === "\t\t");
+  assert("indent carry: mix two-spaces only", nextLineIndent("    baz") === "    ");
+
   return results;
 }
 
@@ -265,7 +279,50 @@ export default function VocabularyMindMapApp() {
   const dragRef = useRef<{ dragging: boolean; sx: number; sy: number; pan0: { x: number; y: number } } | null>(null);
   const [testResults, setTestResults] = useState<TestResult[] | null>(null);
 
+  // --- ローカル履歴＆設定保存 ---
+  type Snapshot = { ts: number; text: string };
+  const [history, setHistory] = useState<Snapshot[]>([]);
+  const STORAGE_KEY = "vocab-mindmap/text";
+  const STORAGE_META_KEY = "vocab-mindmap/meta";
+  const STORAGE_HISTORY_KEY = "vocab-mindmap/history";
+
   useEffect(() => { setTestResults(runSelfTests()); }, []);
+
+  // 初期ロード：保存済みデータ
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      const histStr = localStorage.getItem(STORAGE_HISTORY_KEY);
+      if (saved) setText(saved);
+      if (histStr) setHistory(JSON.parse(histStr));
+      const metaStr = localStorage.getItem(STORAGE_META_KEY);
+      if (metaStr) {
+        const meta = JSON.parse(metaStr);
+        if (typeof meta.zoom === 'number') setZoom(meta.zoom);
+        if (typeof meta.hSpace === 'number') setHSpace(meta.hSpace);
+        if (typeof meta.vSpace === 'number') setVSpace(meta.vSpace);
+        if (typeof meta.tagQuery === 'string') setTagQuery(meta.tagQuery);
+      }
+    } catch {}
+  }, []);
+
+  // オートセーブ（テキスト＆メタ）
+  useEffect(() => { try { localStorage.setItem(STORAGE_KEY, text); } catch {} }, [text]);
+  useEffect(() => {
+    try { localStorage.setItem(STORAGE_META_KEY, JSON.stringify({ zoom, hSpace, vSpace, tagQuery })); } catch {}
+  }, [zoom, hSpace, vSpace, tagQuery]);
+
+  // スナップショット保存（手動/自動）
+  const saveSnapshot = () => {
+    const snap = { ts: Date.now(), text } as Snapshot;
+    const next = [snap, ...history].slice(0, 30);
+    setHistory(next);
+    try { localStorage.setItem(STORAGE_HISTORY_KEY, JSON.stringify(next)); } catch {}
+  };
+  useEffect(() => {
+    const id = setTimeout(() => { saveSnapshot(); }, 2500);
+    return () => clearTimeout(id);
+  }, [text]);
 
   const parsed = useMemo(() => parseText(text), [text]);
   const hierarchy = useMemo(() => toHierarchy(parsed.root), [parsed]);
@@ -313,6 +370,58 @@ export default function VocabularyMindMapApp() {
     const ta = e.currentTarget; const upto = ta.selectionStart ?? 0;
     const before = ta.value.slice(0, upto).replace(/\r\n?/g, "\n");
     const line = before.split("\n").length - 1; setCaretLine(line);
+  };
+
+  // テキストエディタのキー処理（Enter で自動インデント、Tab/Shift+Tab でインデント調整、Ctrl+S でスナップショット）
+  const handleEditorKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    const ta = e.currentTarget;
+    // Ctrl/Cmd+S -> snapshot
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); saveSnapshot(); return; }
+
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const value = ta.value;
+      const start = ta.selectionStart ?? 0; const end = ta.selectionEnd ?? 0;
+      const before = value.slice(0, start);
+      const after = value.slice(end);
+      const prevLineStart = before.lastIndexOf('\n') + 1;
+      const prevLine = before.slice(prevLineStart);
+      const indent = nextLineIndent(prevLine);
+      const insert = "\n" + indent;
+      const next = before + insert + after;
+      setText(next);
+      const caret = (before.length + insert.length);
+      requestAnimationFrame(() => { ta.setSelectionRange(caret, caret); onEditorCursor({ currentTarget: ta } as any); });
+      return;
+    }
+
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      const value = ta.value; const selStart = ta.selectionStart ?? 0; const selEnd = ta.selectionEnd ?? 0;
+      const lineStart = value.lastIndexOf('\n', selStart - 1) + 1;
+      const lineEnd = value.indexOf('\n', selEnd); const actualLineEnd = lineEnd === -1 ? value.length : lineEnd;
+      const selection = value.slice(lineStart, actualLineEnd);
+      const isShift = e.shiftKey;
+      const lines = selection.split('\n');
+      const changed = lines.map((ln) => {
+        if (isShift) {
+          // outdent 2 spaces or 1 tab
+          if (ln.startsWith('\t')) return ln.slice(1);
+          if (ln.startsWith('  ')) return ln.slice(2);
+          return ln;
+        } else {
+          // indent by two spaces (editor uses 2-space level)
+          return '  ' + ln;
+        }
+      }).join('\n');
+      const next = value.slice(0, lineStart) + changed + value.slice(actualLineEnd);
+      setText(next);
+      const delta = changed.length - selection.length;
+      const newStart = selStart + (isShift ? 0 : 2);
+      const newEnd = selEnd + delta;
+      requestAnimationFrame(() => { ta.setSelectionRange(newStart, newEnd); onEditorCursor({ currentTarget: ta } as any); });
+      return;
+    }
   };
 
   // ノード -> 行番号のマップ
@@ -363,7 +472,7 @@ export default function VocabularyMindMapApp() {
     <div className="w-full h-[100vh] bg-neutral-50 text-neutral-800">
       {/* ヘッダー */}
       <div className="flex items-center justify-between px-4 py-2 border-b bg-white">
-        <div className="font-semibold">EnglishTree v1</div>
+        <div className="font-semibold">英単語マインドマップ（テキスト⇔図 同期）</div>
         <div className="flex items-center gap-3 flex-wrap">
           <div className="text-sm text-neutral-500 hidden lg:block">
             インデント: タブ/スペース2個 ｜ 色: <code>\\color</code>{'{#hex|name}'} ｜ ラベル: <code>\\label</code>{'{name}'} ｜ 参照: <code>\\ref</code>{'{name}'} ｜ 品詞: <code>\\pos</code>{'{noun}'} ｜ タグ: <code>\\tags</code>{'{a,b}'}
@@ -375,6 +484,23 @@ export default function VocabularyMindMapApp() {
           <div className="flex items-center gap-2">
             <label className="text-xs" title="タグ AND 検索（空欄で全表示）">タグ検索</label>
             <input className="border rounded px-2 py-1 text-sm" placeholder="noun, topic" value={tagQuery} onChange={(e)=>setTagQuery(e.target.value)} />
+          </div>
+          <div className="flex items-center gap-2">
+            <button className="text-xs border px-2 py-1 rounded" onClick={saveSnapshot} title="現在のテキストをスナップショット保存 (Ctrl+S)">履歴へ保存</button>
+            <details className="text-xs">
+              <summary className="cursor-pointer select-none">履歴 {history.length}</summary>
+              <div className="mt-1 max-h-48 overflow-auto border rounded p-2 bg-white shadow-sm">
+                {history.length === 0 && <div className="text-neutral-500">（まだありません）</div>}
+                {history.map((h, i) => (
+                  <div key={i} className="flex items-center justify-between gap-2 py-1 border-b last:border-b-0">
+                    <div className="truncate max-w-[12rem]">{new Date(h.ts).toLocaleString()}</div>
+                    <div className="flex items-center gap-2">
+                      <button className="border px-2 py-0.5 rounded" onClick={() => setText(h.text)}>復元</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </details>
           </div>
         </div>
       </div>
@@ -405,6 +531,7 @@ export default function VocabularyMindMapApp() {
               onChange={(e) => setText(e.target.value)}
               onClick={onEditorCursor}
               onKeyUp={onEditorCursor}
+              onKeyDown={(e)=>handleEditorKeyDown(e)}
             />
           </div>
         </div>
