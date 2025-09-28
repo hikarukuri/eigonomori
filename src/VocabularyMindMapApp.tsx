@@ -560,8 +560,8 @@ export default function VocabularyMindMapApp() {
   // --- ノードクリック（日本語訳 alert + テキスト行選択）---
   const onNodeClick = (data: RawNode) => {
     if (data.jp && data.jp.trim().length > 0) {
-      // 例: "apple → りんご" のように表示
-      alert(`${data.text} → ${data.jp}`);
+      // 例: "apple : りんご" のように表示
+      alert(`${data.text} : ${data.jp}`);
     }
     const line = idToLine.get(data.id);
     if (typeof line === "number") handleSelectLine(line);
