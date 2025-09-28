@@ -11,6 +11,7 @@ import { jsPDF } from "jspdf";
  * - \label{name} でラベル／本文の \ref{name} は表示から除去してクロスリンクのみ描画
  * - 品詞タグ：\pos{noun|verb|adj|adv|prep|conj|pron|interj}
  * - 任意タグ：\tags{tag1, tag2}
+ * - 日本語訳：\jp{日本語訳} を本文に付けると、ノードクリックで alert 表示されます
  * - タグ検索：入力に合致するタグを持つノードをハイライト（AND検索）
  * - マウスドラッグで右側のマインドマップをパン、スライダーでズーム
  * - Enterで自動インデント改行／Tab/Shift+Tabでインデント調整
@@ -25,6 +26,7 @@ interface RawNode {
   depth: number;
   line: number; // 0-based line index
   text: string; // 表示テキスト（タグ等は除去、\ref は非表示）
+  jp?: string; // ★ 追加: 日本語訳（\jp{...}）
   label?: string;
   color?: string; // 指定色（継承前）
   effectiveColor?: string; // 継承後の有効色
@@ -53,19 +55,19 @@ const COLOR_PRESETS: Record<string, string> = {
 const SAMPLE = `Root \\color{slate}
   Food \\color{blue} \\tags{topic, daily}
     fruit 
-      apple \\label{apple} \\pos{noun}
-      banana \\pos{noun}
+      apple \\label{apple} \\pos{noun} \\jp{りんご}
+      banana \\pos{noun} \\jp{バナナ}
       cherry \\pos{noun}
     vegetable 
-      carrot \\pos{noun}
+      carrot \\pos{noun} \\jp{にんじん}
       onion \\pos{noun}
   Study \\color{purple}
     vocabulary 
       antonyms \\ref{apple}
-      synonyms
+      synonyms \\jp{類義語}
     grammar \\tags{hard}
   Travel \\color{green}
-    airport \\pos{noun}
+    airport \\pos{noun} \\jp{空港}
     hotel \\pos{noun}
       check-in \\pos{noun}
       check-out \\pos{noun}`;
@@ -129,29 +131,36 @@ function parseText(input: string): { root: RawNode; labelToId: Map<string, strin
     let colorRaw: string | undefined = undefined;
     let label: string | undefined = undefined;
     let pos: string | undefined = undefined;
+    let jp: string | undefined = undefined; // ★ 追加
     const refs: string[] = [];
     const tags: string[] = [];
 
-    // \\color{...}
-    const colorMatch = text.match(/\\color\{([^}]+)\}/i);
+    // \\\\color{...}
+    const colorMatch = text.match(/\\\\?color\{([^}]+)\}/i);
     if (colorMatch) {
       colorRaw = colorMatch[1].trim();
       text = text.replace(colorMatch[0], "").trim();
     }
-    // \\label{name}
-    const labelMatch = text.match(/\\label\{([^}]+)\}/);
+    // \\\\label{name}
+    const labelMatch = text.match(/\\\\?label\{([^}]+)\}/);
     if (labelMatch) {
       label = labelMatch[1].trim();
       text = text.replace(labelMatch[0], "").trim();
     }
-    // \\pos{tag}
-    const posMatch = text.match(/\\pos\{([^}]+)\}/i);
+    // \\\\pos{tag}
+    const posMatch = text.match(/\\\\?pos\{([^}]+)\}/i);
     if (posMatch) {
       pos = posMatch[1].trim().toLowerCase();
       text = text.replace(posMatch[0], "").trim();
     }
-    // \\tags{a,b,c}
-    const tagsMatch = text.match(/\\tags\{([^}]+)\}/i);
+    // \\\\jp{日本語}
+    const jpMatch = text.match(/\\\\?jp\{([^}]+)\}/i);
+    if (jpMatch) {
+      jp = jpMatch[1].trim();
+      text = text.replace(jpMatch[0], "").trim();
+    }
+    // \\\\tags{a,b,c}
+    const tagsMatch = text.match(/\\\\?tags\{([^}]+)\}/i);
     if (tagsMatch) {
       const arr = tagsMatch[1]
         .split(/[\,\s]+/)
@@ -162,8 +171,8 @@ function parseText(input: string): { root: RawNode; labelToId: Map<string, strin
     }
     if (pos) tags.push(pos); // pos も tags に含める
 
-    // \\ref{name}（複数可） ※表示テキストからは除去
-    const refRegex = /\\ref\{([^}]+)\}/g;
+    // \\\\ref{name}（複数可） ※表示テキストからは除去
+    const refRegex = /\\\\?ref\{([^}]+)\}/g;
     let m: RegExpExecArray | null;
     while ((m = refRegex.exec(text))) refs.push(m[1].trim());
     text = text.replace(refRegex, "").replace(/\s{2,}/g, " ").trim();
@@ -173,6 +182,7 @@ function parseText(input: string): { root: RawNode; labelToId: Map<string, strin
       depth,
       line: idx,
       text: text.length ? text : "(untitled)",
+      jp,
       color: resolveColor(colorRaw),
       label,
       refs,
@@ -248,11 +258,12 @@ function runSelfTests(): TestResult[] {
   assert("ref captured on second line", refNode?.refs.includes("apple") === true, `refs=${refNode?.refs}`);
   assert("ref removed from display text", !/\\ref\{/.test(refNode?.text || ""), `text=${refNode?.text}`);
 
-  // 4) 品詞・タグの取り込み
-  const t4 = parseText(`word \\pos{noun} \\tags{food, basic}`);
+  // 4) 品詞・タグの取り込み + 日本語訳
+  const t4 = parseText(`word \\pos{noun} \\tags{food, basic} \\jp{ことば}`);
   const n4 = t4.root.children[0];
   assert("pos stored", n4?.pos === "noun", `pos=${n4?.pos}`);
   assert("tags stored", n4?.tags.includes("food") && n4?.tags.includes("basic"), `tags=${n4?.tags}`);
+  assert("jp stored", n4?.jp === "ことば", `jp=${n4?.jp}`);
 
   // 5) SAMPLE 文字列がパースできる
   try {
@@ -340,11 +351,6 @@ export default function VocabularyMindMapApp() {
     setHistory(next);
     try { localStorage.setItem(STORAGE_HISTORY_KEY, JSON.stringify(next)); } catch {}
   };
-  // 自動スナップショットは無効化（ユーザー要望）
-  // useEffect(() => {
-  //   const id = setTimeout(() => { saveSnapshot(); }, 2500);
-  //   return () => clearTimeout(id);
-  // }, [text]);
 
   const parsed = useMemo(() => parseText(text), [text]);
   const hierarchy = useMemo(() => toHierarchy(parsed.root), [parsed]);
@@ -389,12 +395,12 @@ export default function VocabularyMindMapApp() {
     ta.focus(); ta.setSelectionRange(start, end); setCaretLine(lineIdx);
   };
   const onEditorCursor = (e: React.SyntheticEvent<HTMLTextAreaElement>) => {
-    const ta = e.currentTarget; const upto = ta.selectionStart ?? 0;
-    const before = ta.value.slice(0, upto).replace(/\r\n?/g, "\n");
+    const ta = e.currentTarget; const upto = (ta as HTMLTextAreaElement).selectionStart ?? 0;
+    const before = (ta as HTMLTextAreaElement).value.slice(0, upto).replace(/\r\n?/g, "\n");
     const line = before.split("\n").length - 1; setCaretLine(line);
   };
 
-  // テキストエディタのキー処理（Enter で自動インデント、Tab/Shift+Tab でインデント調整、Ctrl+S でスナップショット）
+  // テキストエディタのキー処理
   const handleEditorKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     const ta = e.currentTarget;
     // Ctrl/Cmd+S -> snapshot
@@ -551,6 +557,16 @@ export default function VocabularyMindMapApp() {
     e.preventDefault();
   };
 
+  // --- ノードクリック（日本語訳 alert + テキスト行選択）---
+  const onNodeClick = (data: RawNode) => {
+    if (data.jp && data.jp.trim().length > 0) {
+      // 例: "apple → りんご" のように表示
+      alert(`${data.text} → ${data.jp}`);
+    }
+    const line = idToLine.get(data.id);
+    if (typeof line === "number") handleSelectLine(line);
+  };
+
   return (
     <div className="w-full h-[100vh] bg-neutral-50 text-neutral-800" data-app-root>
 
@@ -559,7 +575,7 @@ export default function VocabularyMindMapApp() {
         <div className="font-semibold">Word Wald by H.K.</div>
         <div className="flex items-center gap-3 flex-wrap" data-toolbar>
           <div className="text-sm text-neutral-500 hidden lg:block">
-            インデント: タブ/スペース2個 ｜ 色: <code>\\color</code>{'{#hex|name}'} ｜ ラベル: <code>\\label</code>{'{name}'} ｜ 参照: <code>\\ref</code>{'{name}'} ｜ 品詞: <code>\\pos</code>{'{noun}'} ｜ タグ: <code>\\tags</code>{'{a,b}'}
+            インデント: タブ/スペース2個 ｜ 色: <code>\\color</code>{'{#hex|name}'} ｜ ラベル: <code>\\label</code>{'{name}'} ｜ 参照: <code>\\ref</code>{'{name}'} ｜ 品詞: <code>\\pos</code>{'{noun}'} ｜ タグ: <code>\\tags</code>{'{a,b}'} ｜ 和訳: <code>\\jp</code>{'{日本語}' }
           </div>
           <div className="flex items-center gap-2">
             <label className="text-xs">Zoom</label>
@@ -689,7 +705,7 @@ export default function VocabularyMindMapApp() {
                       key={`node-${idx}`}
                       transform={`translate(${d.y},${d.x})`}
                       className="cursor-pointer"
-                      onClick={() => { const line = idToLine.get(data.id); if (typeof line === "number") handleSelectLine(line); }}
+                      onClick={() => onNodeClick(data)}
                       opacity={matched ? 1 : 0.25}
                     >
                       <circle r={selected ? 8 : 6} fill="#fff" stroke={color} strokeWidth={selected ? 3 : 2} />
@@ -750,7 +766,8 @@ export default function VocabularyMindMapApp() {
           <li>インデント（タブ or スペース2つ）で階層を作成します。</li>
           <li>色は <code>\\color</code>{'{#0ea5e9}'} または <code>\\color</code>{'{red}'} のように記述できます（プリセット: red, blue, green, orange, purple, teal, pink, gray, slate, amber, lime）。</li>
           <li><code>\\label</code>{'{name}'} で要素にラベルを付け、他の要素本文で <code>\\ref</code>{'{name}'} を使うとクロスリンク（破線）が描かれます（本文表示からは除去されます）。</li>
-          <li>品詞は <code>\\pos</code>{'{noun|verb|adj|adv|prep|conj|pron|interj}'}、任意タグは <code>\\tags</code>{'{a,b}'} で付与できます。タグ検索ボックスに入力すると該当ノードのみ強調表示されます（AND検索）。</li>
+          <li>品詞は <code>\\pos</code>{'{noun|verb|adj|adv|prep|conj|pron|interj}'}、任意タグは <code>\\tags</code>{'{a,b}'} で付与できます。</li>
+          <li>和訳は <code>\\jp</code>{'{日本語}' } を本文に追記します。右側のノードをクリックすると <strong>alert</strong> で <em>英語 → 日本語</em> が表示されます（例: <code>apple \\jp</code>{'{りんご}'}）。</li>
           <li>右側の図はマウスドラッグで移動できます。ズームは上部スライダーから。</li>
           <li>中央のバーをドラッグすると左右パネルの幅を変更できます。</li>
           <li>右上の「PDF出力」で右パネル全体をPDF保存できます。</li>
